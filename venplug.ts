@@ -9,9 +9,9 @@
 import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, sendBotMessage } from "@api/Commands";
 import { definePluginSettings } from "@api/Settings";
 import { makeRange } from "@components/PluginSettings/components";
-import { sendMessage } from "@utils/discord";
+import { getCurrentChannel, getCurrentGuild, sendMessage } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
-import { ButtplugBrowserWebsocketClientConnector, ButtplugClient, ButtplugDeviceError } from "buttplug";
+import { ButtplugBrowserWebsocketClientConnector, ButtplugClient, ButtplugClientDevice, ButtplugDeviceError } from "buttplug";
 
 function isValidWebSocketUrl(url: string): boolean {
     // Regular expression for WebSocket URL validation
@@ -47,7 +47,7 @@ const pluginSettings = definePluginSettings({
     websocketUrl: {
         type: OptionType.STRING,
         description: "The URL of the websocket server",
-        defaultValue: "ws://localhost:12345",
+        default: "ws://localhost:12345",
         onChange: () => {
             handleDisconnection();
             handleConnection();
@@ -77,18 +77,45 @@ const pluginSettings = definePluginSettings({
         type: OptionType.STRING,
         description: "Comma-separated list of words to add to the trigger words (increases vibration per word)",
     },
-    ignoreUsers: {
-        type: OptionType.STRING,
-        description: "Comma-separated list of user IDs to ignore",
+    switchBlacklistToWhitelist: {
+        type: OptionType.BOOLEAN,
+        description: "If true, will switch the blacklist to a whitelist",
     },
-    ignoreChannels: {
+    listedUsers: {
         type: OptionType.STRING,
-        description: "Comma-separated list of channel IDs to ignore",
+        description: "Comma-separated list of user IDs to blacklist/whitelist",
     },
-    ignoreGuilds: {
+    listedChannels: {
         type: OptionType.STRING,
-        description: "Comma-separated list of guild IDs to ignore",
+        description: "Comma-separated list of channel IDs to blacklist/whitelist",
     },
+    listedGuilds: {
+        type: OptionType.STRING,
+        description: "Comma-separated list of guild IDs to blacklist/whitelist",
+    },
+    altOptions: {
+        type: OptionType.SELECT,
+        description: "Alternative options to use",
+        default: "none",
+        options: [
+            {
+                value: "none",
+                label: "None (Default)",
+            },
+            {
+                value: "dmOnly",
+                label: "DM Only",
+            },
+            {
+                value: "currentChannelOnly",
+                label: "Current Channel Only",
+            },
+            {
+                value: "currentGuildOnly",
+                label: "Current Guild Only",
+            },
+        ],
+    }
 });
 
 export default definePlugin({
@@ -152,7 +179,7 @@ export default definePlugin({
             options: [
                 {
                     name: "intensity",
-                    description: "The intensity to use (0 - 100). Default: 30",
+                    description: "The intensity to use (0 - 100). Default: 30%",
                     type: ApplicationCommandOptionType.INTEGER,
                     required: false,
                 },
@@ -167,9 +194,9 @@ export default definePlugin({
             execute: async (opts, _ctx) => {
                 const intensity = findOption(opts, "intensity", 30);
                 const duration = findOption(opts, "duration", 2000);
-                handleVibrate(intensity / 100, duration);
+                await handleVibrate(intensity / 100, duration);
             }
-        }
+        },
     ]
 });
 
@@ -179,6 +206,10 @@ async function handeMessage(message: DiscordMessage) {
     let length = 0;
     let triggered = false;
     let isTargeted = false;
+
+    const listedUsers = pluginSettings.store.listedUsers?.split(",");
+    const listedChannels = pluginSettings.store.listedChannels?.split(",");
+    const listedGuilds = pluginSettings.store.listedGuilds?.split(",");
 
     if (message.author.id === currentUser.id || message.author.bot || message.author.id !== "1063920464029818960")
         return;
@@ -192,13 +223,24 @@ async function handeMessage(message: DiscordMessage) {
     if (!isTargeted)
         return;
 
-    if (pluginSettings.store.ignoreUsers?.includes(message.author.id))
+    if (pluginSettings.store.altOptions === "dmOnly" && message.guild_id)
+        return;
+    else if (pluginSettings.store.altOptions === "currentChannelOnly" && message.channel_id !== getCurrentChannel().id)
+        return;
+    else if (pluginSettings.store.altOptions === "currentGuildOnly" && (!message.guild_id || message.guild_id !== getCurrentGuild()?.id))
         return;
 
-    if (pluginSettings.store.ignoreChannels?.includes(message.channel_id))
-        return;
+    // L this is such a mess :P (someone help me >.<)
 
-    if (message.guild_id && pluginSettings.store.ignoreGuilds?.includes(message.guild_id))
+    const isUserListed = listedUsers?.includes(message.author.id);
+    const isChannelListed = listedChannels?.includes(message.channel_id);
+    const isGuildListed = message.guild_id && listedGuilds?.includes(message.guild_id);
+
+    const shouldIncludeMessage = pluginSettings.store.switchBlacklistToWhitelist
+        ? isUserListed || isChannelListed || isGuildListed
+        : !isUserListed && !isChannelListed && !isGuildListed;
+
+    if (!shouldIncludeMessage)
         return;
 
     const triggerWords = pluginSettings.store.triggerWords?.toLowerCase().split(",");
@@ -242,8 +284,6 @@ async function handleDisconnection() {
 
 async function handleConnection() {
     try {
-        console.log(pluginSettings.store.websocketUrl);
-
         if (!pluginSettings.store.websocketUrl) {
             console.log("no url provided, not attempting to connect");
             return;
@@ -282,16 +322,13 @@ async function handleVibrate(intensity: number, length: number) {
             await sleep(length);
             await device.stop();
         } else {
-            console.log(intensity, length);
             const steps = pluginSettings.store.rampUpAndDownSteps;
             const rampLength = length * 0.2 / steps;
             let startIntensity = 0;
             let endIntensity = intensity;
             let stepIntensity = (endIntensity - startIntensity) / steps;
 
-            console.time("vibrate");
             for (let i = 0; i <= steps; i++) {
-                console.log(startIntensity + (stepIntensity * i));
                 await vibrateDevices(device, startIntensity + (stepIntensity * i));
                 await sleep(rampLength);
             }
@@ -304,18 +341,16 @@ async function handleVibrate(intensity: number, length: number) {
             stepIntensity = (endIntensity - startIntensity) / steps;
 
             for (let i = 0; i <= steps; i++) {
-                console.log(startIntensity + (stepIntensity * i));
                 await vibrateDevices(device, startIntensity + (stepIntensity * i));
                 await sleep(rampLength);
             }
 
             await device.stop();
-            console.timeEnd("vibrate");
         }
     });
 }
 
-async function vibrateDevices(device, intensity) {
+async function vibrateDevices(device: ButtplugClientDevice, intensity: number) {
     if (intensity > 1) intensity = 1;
     if (intensity < 0) intensity = 0;
     await device.vibrate(intensity);
