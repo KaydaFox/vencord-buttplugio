@@ -197,6 +197,29 @@ export default definePlugin({
                 await handleVibrate(intensity / 100, duration);
             }
         },
+        {
+            name: "devices",
+            description: "List all connected devices",
+            inputType: ApplicationCommandInputType.BUILT_IN,
+            execute: async (_opts, ctx) => {
+                if (!client || !client.connected)
+                    return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
+
+                const { devices } = client;
+                if (devices.length === 0)
+                    return sendBotMessage(ctx.channel.id, { content: "No devices connected" });
+
+                const deviceInfo: string[] = [];
+
+                for (let i = 0; i < client.devices.length; i++) {
+                    deviceInfo.push(`**Name:** ${client.devices[i].name}, **Battery:** ${client.devices[i].hasBattery ? `${await client.devices[i].battery() * 100}%` : "No battery"}`);
+                }
+
+                sendBotMessage(ctx.channel.id, {
+                    content: `**Connected devices:** \n ${deviceInfo.join("\n")}`
+                });
+            }
+        }
     ]
 });
 
