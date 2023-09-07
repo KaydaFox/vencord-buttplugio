@@ -27,6 +27,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 let client: ButtplugClient | null = null;
 let connector: ButtplugBrowserWebsocketClientConnector;
 let batteryIntervalId: NodeJS.Timeout | null = null;
+const vibrateQueue: Array<{ intensity: number; length: number; }> = [];
 
 const pluginSettings = definePluginSettings({
     connectAutomatically: {
@@ -126,6 +127,9 @@ export default definePlugin({
     authors: [{
         name: "KaydaFox",
         id: 717329527696785408n
+    }, {
+        name: "danthebitshifter",
+        id: 1063920464029818960n
     }],
     settings: pluginSettings,
     async start() {
@@ -230,7 +234,7 @@ export default definePlugin({
             execute: async (opts, _ctx) => {
                 const intensity = findOption(opts, "intensity", 30);
                 const duration = findOption(opts, "duration", 2000);
-                await handleVibrate(intensity / 100, duration);
+                await addToVibrateQueue(intensity / 100, duration);
             }
         },
         {
@@ -343,7 +347,7 @@ async function handeMessage(message: DiscordMessage) {
             length += 1250;
 
         intensity > 100 ? intensity = 100 : intensity;
-        handleVibrate((intensity * (pluginSettings.store.maxVibrationIntensity / 100) / 100), length);
+        addToVibrateQueue((intensity * (pluginSettings.store.maxVibrationIntensity / 100) / 100), length);
     }
 }
 
@@ -454,45 +458,80 @@ async function checkDeviceBattery() {
     }, 60000); // 1 minute
 }
 
-async function handleVibrate(intensity: number, length: number) {
-    client?.devices.forEach(async device => {
-        if (!pluginSettings.store.rampUpAndDown) {
-            await device.vibrate(intensity);
-            await sleep(length);
-            await device.stop();
-        } else {
-            const steps = pluginSettings.store.rampUpAndDownSteps;
-            const rampLength = length * 0.2 / steps;
-            let startIntensity = 0;
-            let endIntensity = intensity;
-            let stepIntensity = (endIntensity - startIntensity) / steps;
 
-            for (let i = 0; i <= steps; i++) {
-                await vibrateDevices(device, startIntensity + (stepIntensity * i));
-                await sleep(rampLength);
-            }
-
-            await sleep(length * 0.54);
-
-            startIntensity = intensity;
-            endIntensity = 0;
-
-            stepIntensity = (endIntensity - startIntensity) / steps;
-
-            for (let i = 0; i <= steps; i++) {
-                await vibrateDevices(device, startIntensity + (stepIntensity * i));
-                await sleep(rampLength);
-            }
-
-            await device.stop();
-        }
-    });
+async function addToVibrateQueue(intensity: number, length: number) {
+    vibrateQueue.push({ intensity, length });
+    if (vibrateQueue.length === 1) {
+        processVibrateQueue();
+    }
 }
 
-async function vibrateDevices(device: ButtplugClientDevice, intensity: number) {
+async function processVibrateQueue() {
+    if (vibrateQueue.length === 0) {
+        return;
+    }
+
+    const { intensity, length } = vibrateQueue[0];
+
+    try {
+        await handleVibrate(intensity, length);
+    } catch (error) {
+        console.error("Error in handleVibrate:", error);
+    } finally {
+        vibrateQueue.shift();
+
+        processVibrateQueue();
+    }
+}
+
+
+async function handleVibrate(intensity: number, length: number) {
+    if (!client || !client.devices) {
+        return;
+    }
+    if (!pluginSettings.store.rampUpAndDown) {
+        await vibrateDevices(client.devices, intensity);
+        await sleep(length);
+        stopDevices(client.devices);
+    } else {
+        const steps = pluginSettings.store.rampUpAndDownSteps;
+        const rampLength = length * 0.2 / steps;
+        let startIntensity = 0;
+        let endIntensity = intensity;
+        let stepIntensity = (endIntensity - startIntensity) / steps;
+
+        for (let i = 0; i <= steps; i++) {
+            await vibrateDevices(client.devices, startIntensity + (stepIntensity * i));
+            await sleep(rampLength);
+        }
+
+        await sleep(length * 0.54);
+
+        startIntensity = intensity;
+        endIntensity = 0;
+
+        stepIntensity = (endIntensity - startIntensity) / steps;
+
+        for (let i = 0; i <= steps; i++) {
+            await vibrateDevices(client.devices, startIntensity + (stepIntensity * i));
+            await sleep(rampLength);
+        }
+        stopDevices(client.devices);
+    }
+}
+async function stopDevices(devices: ButtplugClientDevice[]) {
+    for (const device of devices) {
+        await device.stop();
+    }
+
+}
+async function vibrateDevices(devices: ButtplugClientDevice[], intensity: number) {
     if (intensity > 1) intensity = 1;
     if (intensity < 0) intensity = 0;
-    await device.vibrate(intensity);
+    for (const device of devices) {
+        await device.vibrate(intensity);
+    }
+
 }
 
 interface FluxMessageCreate {
