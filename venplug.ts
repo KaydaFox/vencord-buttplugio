@@ -13,6 +13,9 @@ import { makeRange } from "@components/PluginSettings/components";
 import { getCurrentChannel, getCurrentGuild, sendMessage } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
 import { ButtplugBrowserWebsocketClientConnector, ButtplugClient, ButtplugClientDevice, ButtplugDeviceError } from "buttplug";
+import { Message } from "discord-types/general";
+import type { PartialDeep } from "type-fest";
+import { FluxDispatcher } from "@webpack/common";
 
 function isValidWebSocketUrl(url: string): boolean {
     // Regular expression for WebSocket URL validation
@@ -27,7 +30,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 let client: ButtplugClient | null = null;
 let connector: ButtplugBrowserWebsocketClientConnector;
 let batteryIntervalId: NodeJS.Timeout | null = null;
-const vibrateQueue: Array<{ intensity: number; length: number; }> = [];
+let vibrateQueue: Array<{ intensity: number; length: number; }> = [];
 
 const pluginSettings = definePluginSettings({
     connectAutomatically: {
@@ -141,7 +144,7 @@ export default definePlugin({
     },
     flux: {
         MESSAGE_CREATE: (payload: FluxMessageCreate) => {
-            handeMessage(payload.message);
+            handleMessage(payload.message);
         },
     },
     commands: [
@@ -184,10 +187,15 @@ export default definePlugin({
                     return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
 
                 await client.startScanning();
+                let message = sendBotMessage(ctx.channel.id, { content: "Started scanning for devices" });
                 if (findOption(_opts, "auto-stop", true) === true)
-                    setTimeout(async () => await client?.stopScanning(), 30000);
+                    setTimeout(async () => {
+                        await client?.stopScanning();
+                        editMessage(message, "Finished scanning for devices");
+                    }, 30000);
 
-                sendBotMessage(ctx.channel.id, { content: "Started scanning for devices" });
+
+
             }
         },
         {
@@ -273,7 +281,7 @@ export default definePlugin({
     ]
 });
 
-async function handeMessage(message: DiscordMessage) {
+async function handleMessage(message: DiscordMessage) {
     const currentUser = Vencord.Webpack.Common.UserStore.getCurrentUser();
     let intensity = 0;
     let length = 0;
@@ -353,6 +361,7 @@ async function handeMessage(message: DiscordMessage) {
 
 async function handleDisconnection() {
     try {
+        vibrateQueue = [];
         if (client && client.connected) await client.disconnect();
         client = null;
         if (batteryIntervalId) clearInterval(batteryIntervalId);
@@ -366,6 +375,13 @@ async function handleDisconnection() {
     } catch (error) {
         console.error(error);
     }
+}
+
+
+export function editMessage(message: PartialDeep<Message>, content: string): Message {
+    message.content = content;
+    FluxDispatcher.dispatch({ type: "MESSAGE_UPDATE", message });
+    return message as Message;
 }
 
 async function handleConnection() {
