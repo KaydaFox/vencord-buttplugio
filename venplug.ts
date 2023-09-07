@@ -26,7 +26,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let client: ButtplugClient | null = null;
 let connector: ButtplugBrowserWebsocketClientConnector;
-let betteryIntervalId: NodeJS.Timeout | null = null;
+let batteryIntervalId: NodeJS.Timeout | null = null;
 
 const pluginSettings = definePluginSettings({
     connectAutomatically: {
@@ -351,7 +351,7 @@ async function handleDisconnection() {
     try {
         if (client && client.connected) await client.disconnect();
         client = null;
-        if (betteryIntervalId) clearInterval(betteryIntervalId);
+        if (batteryIntervalId) clearInterval(batteryIntervalId);
 
         showNotification({
             title: "Disconnected from intiface",
@@ -436,7 +436,7 @@ async function handleConnection() {
 
 async function checkDeviceBattery() {
     if (!client) return;
-    betteryIntervalId = setInterval(async () => {
+    batteryIntervalId = setInterval(async () => {
         client!.devices.forEach(async (device: ButtplugClientDevice) => {
             if (device.hasBattery && !device.warnedLowBattery) {
                 const battery = await device.battery();
