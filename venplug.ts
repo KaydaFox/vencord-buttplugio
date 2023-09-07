@@ -280,7 +280,7 @@ async function handeMessage(message: DiscordMessage) {
     const listedChannels = pluginSettings.store.listedChannels?.split(",");
     const listedGuilds = pluginSettings.store.listedGuilds?.split(",");
 
-    if (message.author.id === currentUser.id || message.author.bot || message.author.id !== "1063920464029818960")
+    if (message.author.id === currentUser.id || message.author.bot)
         return;
 
     const content = message.content.toLowerCase();
