@@ -7,6 +7,7 @@
 // Needed header for all plugins
 
 import { ApplicationCommandInputType, ApplicationCommandOptionType, findOption, sendBotMessage } from "@api/Commands";
+import { showNotification } from "@api/Notifications";
 import { definePluginSettings } from "@api/Settings";
 import { makeRange } from "@components/PluginSettings/components";
 import { getCurrentChannel, getCurrentGuild, sendMessage } from "@utils/discord";
@@ -25,6 +26,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 let client: ButtplugClient | null = null;
 let connector: ButtplugBrowserWebsocketClientConnector;
+let betteryIntervalId: NodeJS.Timeout | null = null;
 
 const pluginSettings = definePluginSettings({
     connectAutomatically: {
@@ -159,6 +161,40 @@ export default definePlugin({
                     return sendBotMessage(ctx.channel.id, { content: "You were already disconnected" });
                 sendBotMessage(ctx.channel.id, { content: "Disconnecting from intiface..." });
                 await handleDisconnection();
+            }
+        },
+        {
+            name: "start_scanning",
+            description: "Start scanning for devices on the intiface server",
+            inputType: ApplicationCommandInputType.BUILT_IN,
+            options: [
+                {
+                    name: "auto-stop",
+                    description: "Auto-stop scanning after 30 seconds (Default: true). if disabled, use /stop_scanning to stop scanning",
+                    type: ApplicationCommandOptionType.BOOLEAN,
+                    required: false,
+                }
+            ],
+            execute: async (_opts, ctx) => {
+                if (!client || !client.connected)
+                    return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
+
+                await client.startScanning();
+                if (findOption(_opts, "auto-stop", true) === true)
+                    setTimeout(async () => await client?.stopScanning(), 30000);
+
+                sendBotMessage(ctx.channel.id, { content: "Started scanning for devices" });
+            }
+        },
+        {
+            name: "stop_scanning",
+            description: "Stop scanning for devices on the intiface server",
+            inputType: ApplicationCommandInputType.BUILT_IN,
+            execute: async (_opts, ctx) => {
+                if (!client || !client.connected)
+                    return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
+                await client.stopScanning();
+                sendBotMessage(ctx.channel.id, { content: "Stopped scanning for devices" });
             }
         },
         {
@@ -312,21 +348,47 @@ async function handeMessage(message: DiscordMessage) {
 }
 
 async function handleDisconnection() {
-    if (client && client.connected) client.disconnect();
+    try {
+        if (client && client.connected) await client.disconnect();
+        client = null;
+        if (betteryIntervalId) clearInterval(betteryIntervalId);
+
+        showNotification({
+            title: "Disconnected from intiface",
+            body: "You are now disconnected from intiface",
+            permanent: false,
+            noPersist: false,
+        });
+    } catch (error) {
+        console.error(error);
+    }
 }
 
 async function handleConnection() {
     try {
         if (!pluginSettings.store.websocketUrl) {
-            console.log("no url provided, not attempting to connect");
-            return;
+            return showNotification({
+                title: "No URL provided for intiface",
+                body: "Please provide a URL in the settings, connecting to intiface disabled",
+                permanent: false,
+                noPersist: false,
+            });
         }
 
         connector = new ButtplugBrowserWebsocketClientConnector(pluginSettings.store.websocketUrl);
         if (!client)
             client = new ButtplugClient("Vencord");
 
-        client.addListener("deviceadded", async device => {
+        client.addListener("deviceadded", async (device: ButtplugClientDevice) => {
+            device.warnedLowBattery = false;
+
+            showNotification({
+                title: `Device added (Total devices: ${client?.devices.length})`,
+                body: `A device named "${device.name}" was added ${device.hasBattery && `and has a battery level of ${await device.battery() * 100}%`}`,
+                permanent: false,
+                noPersist: false,
+            });
+
             if (device.vibrateAttributes.length === 0)
                 return;
 
@@ -342,10 +404,54 @@ async function handleConnection() {
             }
         });
 
+        client.addListener("deviceremoved", (device: ButtplugClientDevice) => {
+            showNotification({
+                title: "Device removed",
+                body: `A device named "${device.name}" was removed`,
+                permanent: false,
+                noPersist: false,
+            });
+        });
+
         await client.connect(connector).then(() => console.log("Buttplug.io connected"));
+
+        checkDeviceBattery();
+
+        showNotification({
+            title: "Connected to intiface",
+            body: "You are now connected to intiface",
+            permanent: false,
+            noPersist: false,
+        });
     } catch (error) {
         console.error(error);
+        showNotification({
+            title: "Failed to connect to intiface",
+            body: "Failed to connect to intiface, please check the console for more information",
+            permanent: false,
+            noPersist: false,
+        });
     }
+}
+
+async function checkDeviceBattery() {
+    if (!client) return;
+    betteryIntervalId = setInterval(async () => {
+        client!.devices.forEach(async (device: ButtplugClientDevice) => {
+            if (device.hasBattery && !device.warnedLowBattery) {
+                const battery = await device.battery();
+                if (battery < 0.1) {
+                    device.warnedLowBattery = true;
+                    showNotification({
+                        title: "Device battery low",
+                        body: `The battery of device "${device.name}" is low (${battery * 100}%)`,
+                        permanent: false,
+                        noPersist: false,
+                    });
+                }
+            }
+        });
+    }, 60000); // 1 minute
 }
 
 async function handleVibrate(intensity: number, length: number) {
@@ -420,4 +526,10 @@ interface DiscordUser {
     username: string;
     id: string;
     bot: boolean;
+}
+
+declare module "buttplug" {
+    interface ButtplugClientDevice {
+        warnedLowBattery: boolean;
+    }
 }
