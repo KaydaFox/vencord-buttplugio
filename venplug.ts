@@ -201,6 +201,14 @@ export default definePlugin({
             name: "devices",
             description: "List all connected devices",
             inputType: ApplicationCommandInputType.BUILT_IN,
+            options: [
+                {
+                    name: "send_to_channel",
+                    description: "Send the list to the current channel (Default: false)",
+                    type: ApplicationCommandOptionType.BOOLEAN,
+                    required: false,
+                }
+            ],
             execute: async (_opts, ctx) => {
                 if (!client || !client.connected)
                     return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
@@ -215,7 +223,9 @@ export default definePlugin({
                     deviceInfo.push(`**Name:** ${client.devices[i].name}, **Battery:** ${client.devices[i].hasBattery ? `${await client.devices[i].battery() * 100}%` : "No battery"}`);
                 }
 
-                sendBotMessage(ctx.channel.id, {
+                findOption(_opts, "send_to_channel") ? sendMessage(ctx.channel.id, {
+                    content: `**Connected devices:** \n ${deviceInfo.join("\n")}`
+                }) : sendBotMessage(ctx.channel.id, {
                     content: `**Connected devices:** \n ${deviceInfo.join("\n")}`
                 });
             }
