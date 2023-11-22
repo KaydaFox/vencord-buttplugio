@@ -12,10 +12,10 @@ import { definePluginSettings } from "@api/Settings";
 import { makeRange } from "@components/PluginSettings/components";
 import { getCurrentChannel, getCurrentGuild, sendMessage } from "@utils/discord";
 import definePlugin, { OptionType } from "@utils/types";
+import { FluxDispatcher } from "@webpack/common";
 import { ButtplugBrowserWebsocketClientConnector, ButtplugClient, ButtplugClientDevice, ButtplugDeviceError } from "buttplug";
 import { Message } from "discord-types/general";
 import type { PartialDeep } from "type-fest";
-import { FluxDispatcher } from "@webpack/common";
 
 function isValidWebSocketUrl(url: string): boolean {
     // Regular expression for WebSocket URL validation
@@ -30,7 +30,8 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 let client: ButtplugClient | null = null;
 let connector: ButtplugBrowserWebsocketClientConnector;
 let batteryIntervalId: NodeJS.Timeout | null = null;
-let vibrateQueue: Array<{ intensity: number; length: number; }> = [];
+let vibrateQueue: VibrateEvent[] = [];
+const recentlyHandledMessages: string[] = [];
 
 const pluginSettings = definePluginSettings({
     connectAutomatically: {
@@ -121,6 +122,25 @@ const pluginSettings = definePluginSettings({
                 label: "Current Guild Only",
             },
         ],
+    },
+    allowDirectUserControl: {
+        type: OptionType.BOOLEAN,
+        description: "Allow other users to directly control your toy",
+        default: false,
+    },
+    directControlAllowedUsers: {
+        type: OptionType.STRING,
+        description: "UserIDs to grant command access to",
+    },
+    directControlCommandPrefix: {
+        type: OptionType.STRING,
+        description: "The prefix for the command to be used",
+        default: ">.",
+        onChange(newValue: string) {
+            if (!newValue || newValue === "") {
+                pluginSettings.store.directControlCommandPrefix = ">.";
+            }
+        },
     }
 });
 
@@ -187,7 +207,7 @@ export default definePlugin({
                     return sendBotMessage(ctx.channel.id, { content: "You are not connected to intiface" });
 
                 await client.startScanning();
-                let message = sendBotMessage(ctx.channel.id, { content: "Started scanning for devices" });
+                const message = sendBotMessage(ctx.channel.id, { content: "Started scanning for devices" });
                 if (findOption(_opts, "auto-stop", true) === true)
                     setTimeout(async () => {
                         await client?.stopScanning();
@@ -242,7 +262,7 @@ export default definePlugin({
             execute: async (opts, _ctx) => {
                 const intensity = findOption(opts, "intensity", 30);
                 const duration = findOption(opts, "duration", 2000);
-                await addToVibrateQueue(intensity / 100, duration);
+                await addToVibrateQueue(<VibrateEvent>{ duration, strength: intensity / 100 });
             }
         },
         {
@@ -282,23 +302,149 @@ export default definePlugin({
 });
 
 async function handleMessage(message: DiscordMessage) {
+    if (message.state && message.state === "SENDING") return;
+    if (recentlyHandledMessages.includes(message.id)) {
+        return;
+    } else {
+        recentlyHandledMessages.push(message.id);
+        if (recentlyHandledMessages.length > 99) {
+            recentlyHandledMessages.shift();
+        }
+    }
+
     const currentUser = Vencord.Webpack.Common.UserStore.getCurrentUser();
     let intensity = 0;
     let length = 0;
     let triggered = false;
     let isTargeted = false;
 
+    if (!message.guild_id) console.log(message);
+
     const listedUsers = pluginSettings.store.listedUsers?.split(",");
     const listedChannels = pluginSettings.store.listedChannels?.split(",");
     const listedGuilds = pluginSettings.store.listedGuilds?.split(",");
 
+    const directControlEnabled: boolean = pluginSettings.store.allowDirectUserControl;
+    const directControlUsers: string[] = pluginSettings.store.directControlAllowedUsers?.split(" ") ?? [];
+    const { directControlCommandPrefix } = pluginSettings.store;
+
+    const content = message.content.toLowerCase();
+
+    if (directControlEnabled && (message.author.id === currentUser.id || directControlUsers.length > 0) && content.startsWith(directControlCommandPrefix)) {
+        const command = content.replace(directControlCommandPrefix, "");
+        const commandInfo = command.split(" "); // vibrate 1 20 // vibrate 20
+
+        if (message.author.id !== currentUser.id && !directControlUsers.includes(message.author.id)) return;
+
+        if (!client || !client.connected) {
+            return sendMessage(message.channel_id, {
+                content: "My client isn't connected right now"
+            });
+        }
+
+        switch (commandInfo[0]) {
+            case "v":
+            case "vibrate": {
+                if (commandInfo.length < 2 || commandInfo.length > 3) {
+                    return sendMessage(message.channel_id, {
+                        content: `Incorrect arguments provided. \n**Correct usages**\nAll devices: ${directControlCommandPrefix}vibrate 20\nSpecific device: ${directControlCommandPrefix}vibrate 1 20\narguments: vibrate <deviceId?> <amount>`
+                    });
+                }
+
+                if (commandInfo.length === 3) {
+                    const deviceId = Number(commandInfo[1]);
+                    if (isNaN(deviceId) || client.devices.length > deviceId || deviceId < 1) return sendMessage(message.channel_id, {
+                        content: "Invalid device ID provided"
+                    });
+
+                    let vibrationStrength = Number(commandInfo[2]);
+                    if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                        content: "Invalid vibration strength"
+                    });
+
+                    vibrationStrength > 100 ? vibrationStrength = 100 : vibrationStrength;
+
+                    return client.devices[deviceId - 1].vibrate((vibrationStrength * (pluginSettings.store.maxVibrationIntensity / 100) / 100));
+                }
+
+                let vibrationStrength = Number(commandInfo[1]);
+                if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                    content: "Invalid vibration strength"
+                });
+
+                if (vibrationStrength > pluginSettings.store.maxVibrationIntensity) vibrationStrength = pluginSettings.store.maxVibrationIntensity;
+
+                return client.devices.forEach(device => {
+                    device.vibrate(vibrationStrength / 100);
+                });
+            }
+            case "durationVibration":
+            case "vibrationDuration":
+            case "vd":
+                if (commandInfo.length < 3 || commandInfo.length > 4) {
+                    return sendMessage(message.channel_id, {
+                        content: `Incorrect arguments provided. \n**Correct usages**\nAll devices: ${directControlCommandPrefix}vibrate 20 2000\nSpecific device: ${directControlCommandPrefix}vibrate 1 20 2000\narguments: vibrate <deviceId?> <amount> <timeInMilliseconds>`
+                    });
+                }
+
+                if (commandInfo.length === 4) {
+                    const deviceId = Number(commandInfo[1]);
+                    if (isNaN(deviceId) || client.devices.length > deviceId || deviceId < 1) return sendMessage(message.channel_id, {
+                        content: "Invalid device ID provided"
+                    });
+
+                    let vibrationStrength = Number(commandInfo[2]);
+                    if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                        content: "Invalid vibration strength"
+                    });
+
+                    const durationTime = Number(commandInfo[3]);
+                    if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                        content: "Invalid duration time"
+                    });
+
+                    vibrationStrength > 100 ? vibrationStrength = 100 : vibrationStrength;
+
+                    return addToVibrateQueue({ strength: (vibrationStrength * (pluginSettings.store.maxVibrationIntensity / 100) / 100), duration: durationTime, deviceId: deviceId - 1 });
+                }
+
+                let vibrationStrength = Number(commandInfo[1]);
+                if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                    content: "Invalid vibration strength"
+                });
+
+                const durationTime = Number(commandInfo[2]);
+                if (isNaN(vibrationStrength) || vibrationStrength < 0) return sendMessage(message.channel_id, {
+                    content: "Invalid duration time"
+                });
+
+                vibrationStrength > 100 ? vibrationStrength = 100 : vibrationStrength;
+
+                return addToVibrateQueue({ strength: (vibrationStrength * (pluginSettings.store.maxVibrationIntensity / 100) / 100), duration: durationTime });
+
+            case "d":
+            case "devices": {
+                const deviceInfo: string[] = [];
+
+                for (let i = 0; i < client.devices.length; i++) {
+                    deviceInfo.push(`**Name:** ${client.devices[i].name}, **ID:** ${i + 1}, **Battery:** ${client.devices[i].hasBattery ? `${await client.devices[i].battery() * 100}%` : "No battery"}`);
+                }
+
+                return sendMessage(message.channel_id, {
+                    content: `**Connected devices:** \n${deviceInfo.join("\n")}`
+                });
+            }
+        }
+
+        return;
+    }
+
     if (message.author.id === currentUser.id || message.author.bot)
         return;
 
-    const content = message.content.toLowerCase();
     const targetWords = pluginSettings.store.targetWords?.toLowerCase().split(",");
 
-    if (message.mentions?.some(mention => mention.id === currentUser.id) || message.content.includes(currentUser.username) || message.referenced_message?.author.id === currentUser.id || !message.guild_id || targetWords?.some(targetWord => content.includes(targetWord)))
+    if (message.mentions?.some(mention => mention.id === currentUser.id) || content.includes(currentUser.username) || message.referenced_message?.author.id === currentUser.id || !message.guild_id || targetWords?.some(targetWord => content.includes(targetWord)))
         isTargeted = true;
 
     if (!isTargeted)
@@ -355,7 +501,7 @@ async function handleMessage(message: DiscordMessage) {
             length += 1250;
 
         intensity > 100 ? intensity = 100 : intensity;
-        addToVibrateQueue((intensity * (pluginSettings.store.maxVibrationIntensity / 100) / 100), length);
+        addToVibrateQueue({ strength: (intensity * (pluginSettings.store.maxVibrationIntensity / 100) / 100), duration: length });
     }
 }
 
@@ -474,9 +620,8 @@ async function checkDeviceBattery() {
     }, 60000); // 1 minute
 }
 
-
-async function addToVibrateQueue(intensity: number, length: number) {
-    vibrateQueue.push({ intensity, length });
+async function addToVibrateQueue(data: VibrateEvent) {
+    vibrateQueue.push(data);
     if (vibrateQueue.length === 1) {
         processVibrateQueue();
     }
@@ -487,10 +632,10 @@ async function processVibrateQueue() {
         return;
     }
 
-    const { intensity, length } = vibrateQueue[0];
+    const data = vibrateQueue[0];
 
     try {
-        await handleVibrate(intensity, length);
+        await handleVibrate(data);
     } catch (error) {
         console.error("Error in handleVibrate:", error);
     } finally {
@@ -501,38 +646,40 @@ async function processVibrateQueue() {
 }
 
 
-async function handleVibrate(intensity: number, length: number) {
+async function handleVibrate(data: VibrateEvent) {
     if (!client || !client.devices) {
         return;
     }
+
+    const devices = data.deviceId ? [client.devices[data.deviceId]] : client.devices;
     if (!pluginSettings.store.rampUpAndDown) {
-        await vibrateDevices(client.devices, intensity);
-        await sleep(length);
-        stopDevices(client.devices);
+        await vibrateDevices(devices, data.strength);
+        await sleep(data.duration);
+        stopDevices(devices);
     } else {
         const steps = pluginSettings.store.rampUpAndDownSteps;
-        const rampLength = length * 0.2 / steps;
+        const rampLength = data.duration * 0.2 / steps;
         let startIntensity = 0;
-        let endIntensity = intensity;
+        let endIntensity = data.strength;
         let stepIntensity = (endIntensity - startIntensity) / steps;
 
         for (let i = 0; i <= steps; i++) {
-            await vibrateDevices(client.devices, startIntensity + (stepIntensity * i));
+            await vibrateDevices(devices, startIntensity + (stepIntensity * i));
             await sleep(rampLength);
         }
 
-        await sleep(length * 0.54);
+        await sleep(data.duration * 0.54);
 
-        startIntensity = intensity;
+        startIntensity = data.strength;
         endIntensity = 0;
 
         stepIntensity = (endIntensity - startIntensity) / steps;
 
         for (let i = 0; i <= steps; i++) {
-            await vibrateDevices(client.devices, startIntensity + (stepIntensity * i));
+            await vibrateDevices(devices, startIntensity + (stepIntensity * i));
             await sleep(rampLength);
         }
-        stopDevices(client.devices);
+        stopDevices(devices);
     }
 }
 async function stopDevices(devices: ButtplugClientDevice[]) {
@@ -547,7 +694,6 @@ async function vibrateDevices(devices: ButtplugClientDevice[], intensity: number
     for (const device of devices) {
         await device.vibrate(intensity);
     }
-
 }
 
 interface FluxMessageCreate {
@@ -574,6 +720,10 @@ interface DiscordMessage {
     channel_id: string;
     id: string;
     type: number;
+    channel: {
+        id: string;
+    };
+    state?: string;
 }
 
 interface DiscordUser {
@@ -588,3 +738,9 @@ declare module "buttplug" {
         warnedLowBattery: boolean;
     }
 }
+
+type VibrateEvent = {
+    duration: number,
+    strength: number,
+    deviceId?: number;
+};
